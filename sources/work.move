@@ -14,9 +14,9 @@ const ENotForSale: u64 = 4;
 public struct Work has key {
     id: UID,
     creator: address,
-    parentId: vector<ID>, 
+    parentId: Option<ID>, 
     metadata: Metadata,
-    fee: Option<u64>, // if None, it's free
+    fee: u64, // if None, it's free
     licenseOptions: LicenseOption, // 
 }
 
@@ -26,12 +26,15 @@ public struct Metadata has copy, drop, store {
     file_type: String,
     file_size: u64,
     tags: vector<String>,
+    category: String,
 }
 
 // license option
 public struct LicenseOption has copy, drop, store {
-    name: String,
-    terms_url: String,
+    rule: String,
+    price: u64,
+    royaltyRatio: u64,
+
 }
 
 // give View to user who paid
@@ -48,30 +51,54 @@ public struct Cap has key {
 }
 
 // create Work (upload file)
-public fun create_work(
-    parentId: vector<ID>,
+fun create_work(
     metadata: Metadata,
-    fee: Option<u64>,
+    fee: u64,
     license_options: LicenseOption,
     ctx: &mut TxContext
 ): Cap {
     let work = Work {
         id: object::new(ctx),
         creator: ctx.sender(),
-        parentId: parentId, // ** parentId 어떻게 받을지
+        parentId: option::none(),
         metadata: metadata,
         fee: fee,
         licenseOptions: license_options,
     };
 
-    let cap = Cap {
-        id: object::new(ctx),
-        work_id: object::id(&work),
-    };
+    let work_id = object::id(&work);
     transfer::share_object(work);
-    cap
+    Cap { id: object::new(ctx), work_id }
 }
 
+fun create_work_with_parent(
+    parent_work: &Work,
+    metadata: Metadata,
+    fee: u64,
+    license_options: LicenseOption,
+    ctx: &mut TxContext
+): Cap {
+    let work = Work {
+        id: object::new(ctx),
+        creator: ctx.sender(),
+        parentId: option::some(object::id(parent_work)),
+        metadata: metadata,
+        fee: fee,
+        licenseOptions: license_options,
+    };
+
+    let work_id = object::id(&work);
+    transfer::share_object(work);
+
+    // Create and transfer a cap to the parent's creator
+    let parent_cap = Cap { id: object::new(ctx), work_id };
+    transfer::transfer(parent_cap, parent_work.creator);
+
+    // Return a cap for the new work's creator
+    Cap { id: object::new(ctx), work_id }
+}
+
+/// Entry function to create a new Work without a parent.
 entry fun create_work_entry(
     // metadata field
     title: String,
@@ -79,25 +106,59 @@ entry fun create_work_entry(
     file_type: String,
     file_size: u64,
     tags: vector<String>,
+    category: String,
     // licenseOptions field
-    license_name: String,
-    license_url: String,
+    rule: String,
+    price: u64,
+    royaltyRatio: u64,
     // other fields
-    parentId: vector<ID>,
-    fee: Option<u64>,
+    fee: u64,
     ctx: &mut TxContext
 ) {
    // make Metadata struct from parameters
-    let metadata = Metadata { title, description, file_type, file_size, tags };
+    let metadata = Metadata { title, description, file_type, file_size, tags, category };
 
     // make LicenseOption struct from parameters
-    let license_options = LicenseOption {
-        name: license_name,
-        terms_url: license_url,
+    let license_option = LicenseOption {
+        rule: rule,
+        price: price,
+        royaltyRatio: royaltyRatio,
     };
 
-    let cap = create_work(parentId, metadata, fee, license_options, ctx);
-    transfer::transfer(cap, ctx.sender());
+    // Call create_work with no parent
+    let creator_cap = create_work(metadata, fee, license_option, ctx);
+    transfer::transfer(creator_cap, ctx.sender());
+}
+
+/// Entry function to create a new Work with a parent.
+entry fun create_work_with_parent_entry(
+    parent_work: &Work,
+    // metadata field
+    title: String,
+    description: String,
+    file_type: String,
+    file_size: u64,
+    tags: vector<String>,
+    category: String,
+    // licenseOptions field
+    rule: String,
+    price: u64,
+    royaltyRatio: u64,
+    // other fields
+    fee: u64,
+    ctx: &mut TxContext
+) {
+    let metadata = Metadata { title, description, file_type, file_size, tags, category };
+
+    let license_option = LicenseOption {
+        rule: rule,
+        price: price,
+        royaltyRatio: royaltyRatio,
+    };
+
+    // Call create_work with the parent
+    let creator_cap = create_work_with_parent(parent_work, metadata, fee, license_option, ctx);
+    transfer::transfer(creator_cap, ctx.sender());
 }
 
 public fun pay(
@@ -105,9 +166,10 @@ public fun pay(
     work: &Work,
     ctx: &mut TxContext,
 ): View {
-    let work_fee = option::destroy_some(work.fee);
-    assert!(fee.value() == work_fee, EInvalidFee);
-
+    assert!(fee.value() == work.fee, EInvalidFee);
+    if (work.fee == 0) {
+        abort ENotForSale;
+    };
     transfer::public_transfer(fee, work.creator);
     View {
         id: object::new(ctx),
@@ -124,7 +186,7 @@ public fun transfer(view: View, to: address) {
 // Access control
 /// key format: [pkg id]::[work id][random nonce]
 
-/// All allowlisted addresses can access all IDs with the prefix of the allowlist
+/// check if the given seal id is the right id for the work
 fun approve_internal(id: vector<u8>, view: &View, work: &Work): bool {
     if (object::id(work) != view.work_id) {
         return false
