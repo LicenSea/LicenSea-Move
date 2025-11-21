@@ -10,14 +10,16 @@ const EInvalidFee: u64 = 1;
 const ENoAccess: u64 = 2;
 const MARKER: u64 = 3;
 const ENotForSale: u64 = 4;
+const ERevokedWork: u64 = 5;
 
 public struct Work has key {
     id: UID,
     creator: address,
     parentId: Option<ID>, 
     metadata: Metadata,
-    fee: u64, // if None, it's free
-    licenseOptions: LicenseOption, // 
+    fee: u64,
+    licenseOptions: LicenseOption,
+    revoked: bool,
 }
 
 public struct Metadata has copy, drop, store {
@@ -32,9 +34,7 @@ public struct Metadata has copy, drop, store {
 // license option
 public struct LicenseOption has copy, drop, store {
     rule: String,
-    price: u64,
     royaltyRatio: u64,
-
 }
 
 // give View to user who paid
@@ -64,6 +64,7 @@ fun create_work(
         metadata: metadata,
         fee: fee,
         licenseOptions: license_options,
+        revoked: false,
     };
 
     let work_id = object::id(&work);
@@ -85,6 +86,7 @@ fun create_work_with_parent(
         metadata: metadata,
         fee: fee,
         licenseOptions: license_options,
+        revoked: false,
     };
 
     let work_id = object::id(&work);
@@ -109,7 +111,6 @@ entry fun create_work_entry(
     category: String,
     // licenseOptions field
     rule: String,
-    price: u64,
     royaltyRatio: u64,
     // other fields
     fee: u64,
@@ -121,7 +122,6 @@ entry fun create_work_entry(
     // make LicenseOption struct from parameters
     let license_option = LicenseOption {
         rule: rule,
-        price: price,
         royaltyRatio: royaltyRatio,
     };
 
@@ -142,7 +142,6 @@ entry fun create_work_with_parent_entry(
     category: String,
     // licenseOptions field
     rule: String,
-    price: u64,
     royaltyRatio: u64,
     // other fields
     fee: u64,
@@ -152,7 +151,6 @@ entry fun create_work_with_parent_entry(
 
     let license_option = LicenseOption {
         rule: rule,
-        price: price,
         royaltyRatio: royaltyRatio,
     };
 
@@ -161,26 +159,22 @@ entry fun create_work_with_parent_entry(
     transfer::transfer(creator_cap, ctx.sender());
 }
 
-public fun pay(
+entry fun pay(
     fee: Coin<SUI>,
     work: &Work,
     ctx: &mut TxContext,
-): View {
+) {
+    assert!(!work.revoked, ERevokedWork);
+    assert!(work.fee > 0, ENotForSale);
     assert!(fee.value() == work.fee, EInvalidFee);
-    if (work.fee == 0) {
-        abort ENotForSale;
-    };
+
     transfer::public_transfer(fee, work.creator);
-    View {
+    let view = View {
         id: object::new(ctx),
         work_id: object::id(work),
         veiwer: ctx.sender(), // todo : check ctx.sender() is viewer
-    }
-}
-
-
-public fun transfer(view: View, to: address) {
-    transfer::transfer(view, to);
+    };
+    transfer::transfer(view, ctx.sender());
 }
 
 // Access control
@@ -188,6 +182,7 @@ public fun transfer(view: View, to: address) {
 
 /// check if the given seal id is the right id for the work
 fun approve_internal(id: vector<u8>, view: &View, work: &Work): bool {
+    if (work.revoked) return false;
     if (object::id(work) != view.work_id) {
         return false
     };
@@ -201,7 +196,13 @@ entry fun seal_approve(id: vector<u8>, view: &View, work: &Work) {
 }
 
 /// Encapsulate a blob into a Sui object and attach it to the Subscription
-public fun publish(work: &mut Work, cap: &Cap, blob_id: String) {
+entry fun publish(work: &mut Work, cap: &Cap, blob_id: String) {
     assert!(cap.work_id == object::id(work), EInvalidCap);
     df::add(&mut work.id, blob_id, MARKER);
+}
+
+/// Revoke a Work - only the Cap holder (creator) can do this
+entry fun revoke_work(work: &mut Work, cap: &Cap) {
+    assert!(cap.work_id == object::id(work), EInvalidCap);
+    work.revoked = true;
 }
