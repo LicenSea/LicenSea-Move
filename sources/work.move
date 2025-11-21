@@ -201,8 +201,8 @@ entry fun publish(work: &mut Work, cap: &Cap, blob_id: String) {
     df::add(&mut work.id, blob_id, MARKER);
 }
 
-/// Revoke a Work - only the Cap holder (creator) can do this
-entry fun revoke_work(work: &mut Work, cap: &Cap) {
+/// Set Work revocation - only the Cap holder (creator) can do this
+entry fun set_revoke_work(work: &mut Work, cap: &Cap) {
     assert!(cap.work_id == object::id(work), EInvalidCap);
-    work.revoked = true;
+    work.revoked = !work.revoked;
 }
